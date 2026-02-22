@@ -621,6 +621,7 @@ pub struct IoContext {
     wakeup_write: OwnedFd,
     stdin_thread: thread::JoinHandle<()>,
     mux_thread: thread::JoinHandle<()>,
+    resize_thread: thread::JoinHandle<()>,
     stdout_thread: thread::JoinHandle<()>,
 }
 
@@ -633,6 +634,7 @@ pub fn spawn_vm_io(
     output_monitor: Arc<OutputMonitor>,
     vm_output_fd: OwnedFd,
     vm_input_fd: OwnedFd,
+    resize_control_fd: OwnedFd,
 ) -> IoContext {
     let (input_tx, input_rx): (Sender<VmInput>, Receiver<VmInput>) = mpsc::channel();
 
@@ -756,11 +758,51 @@ pub fn spawn_vm_io(
         }
     });
 
+    let resize_thread = thread::spawn({
+        let wakeup_read = wakeup_read.try_clone().unwrap();
+        move || {
+            let mut writer = std::fs::File::from(resize_control_fd);
+            let resize_fd = writer.as_raw_fd();
+            let flags = unsafe { libc::fcntl(resize_fd, libc::F_GETFL) };
+            if flags >= 0 {
+                let _ = unsafe { libc::fcntl(resize_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+            }
+
+            loop {
+                let mut pollfd = libc::pollfd {
+                    fd: wakeup_read.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let poll_result = unsafe { libc::poll(&mut pollfd, 1, 200) };
+                if poll_result > 0 && (pollfd.revents & libc::POLLIN) != 0 {
+                    break;
+                }
+
+                if let Some((rows, cols)) = terminal_size(libc::STDOUT_FILENO) {
+                    let message = format!("{rows} {cols}\n");
+                    let bytes = message.as_bytes();
+                    match writer.write(bytes) {
+                        Ok(n) if n == bytes.len() => {}
+                        Ok(_) => {}
+                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(err) => {
+                            eprintln!("[resize_thread] write failed: {err:?}");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     IoContext {
         input_tx,
         wakeup_write,
         stdin_thread,
         mux_thread,
+        resize_thread,
         stdout_thread,
     }
 }
@@ -772,6 +814,7 @@ impl IoContext {
         let _ = self.stdin_thread.join();
         let _ = self.stdout_thread.join();
         let _ = self.mux_thread.join();
+        let _ = self.resize_thread.join();
     }
 }
 
@@ -780,6 +823,7 @@ fn create_vm_configuration(
     directory_shares: &[DirectoryShare],
     vm_reads_from_fd: OwnedFd,
     vm_writes_to_fd: OwnedFd,
+    resize_reads_from_fd: OwnedFd,
     cpu_count: usize,
     ram_bytes: u64,
 ) -> Result<Retained<VZVirtualMachineConfiguration>, Box<dyn std::error::Error>> {
@@ -870,7 +914,7 @@ fn create_vm_configuration(
         }
 
         ////////////////////////////
-        // Serial port
+        // Serial ports
         {
             let ns_read_handle = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
                 NSFileHandle::alloc(),
@@ -893,8 +937,24 @@ fn create_vm_configuration(
             let serial_port = VZVirtioConsoleDeviceSerialPortConfiguration::new();
             serial_port.setAttachment(Some(&serial_attach));
 
-            let serial_ports: Retained<NSArray<_>> =
-                NSArray::from_retained_slice(&[Retained::into_super(serial_port)]);
+            let resize_read_handle = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
+                NSFileHandle::alloc(),
+                resize_reads_from_fd.into_raw_fd(),
+                true,
+            );
+            let resize_attach =
+                VZFileHandleSerialPortAttachment::initWithFileHandleForReading_fileHandleForWriting(
+                    VZFileHandleSerialPortAttachment::alloc(),
+                    Some(&resize_read_handle),
+                    None,
+                );
+            let resize_port = VZVirtioConsoleDeviceSerialPortConfiguration::new();
+            resize_port.setAttachment(Some(&resize_attach));
+
+            let serial_ports: Retained<NSArray<_>> = NSArray::from_retained_slice(&[
+                Retained::into_super(serial_port),
+                Retained::into_super(resize_port),
+            ]);
 
             config.setSerialPorts(&serial_ports);
         }
@@ -975,12 +1035,14 @@ fn run_vm(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (vm_reads_from, we_write_to) = create_pipe();
     let (we_read_from, vm_writes_to) = create_pipe();
+    let (resize_reads_from, we_write_resize_to) = create_pipe();
 
     let config = create_vm_configuration(
         disk_path,
         directory_shares,
         vm_reads_from,
         vm_writes_to,
+        resize_reads_from,
         cpu_count,
         ram_bytes,
     )?;
@@ -1033,7 +1095,12 @@ fn run_vm(
     println!("VM booting...");
 
     let output_monitor = Arc::new(OutputMonitor::default());
-    let io_ctx = spawn_vm_io(output_monitor.clone(), we_read_from, we_write_to);
+    let io_ctx = spawn_vm_io(
+        output_monitor.clone(),
+        we_read_from,
+        we_write_to,
+        we_write_resize_to,
+    );
 
     let mut all_login_actions = vec![
         Expect {
@@ -1047,7 +1114,13 @@ fn run_vm(
         },
         // Our terminal is connected via /dev/hvc0 which Debian apparently keeps barebones.
         // We want sane terminal defaults like icrnl (translating carriage returns into newlines)
-        Send("stty sane".to_string()),
+        Send("stty -F /dev/hvc0 sane".to_string()),
+        // In background, continuously read host terminal resizes sent over hvc1 and update hvc0.
+        Send({
+            // sorry for this nonsense, the string is so long it angers rustfmt =(
+            const S: &str = "sh -c '(while IFS=\" \" read -r rows cols; do stty -F /dev/hvc0 rows \"$rows\" cols \"$cols\"; done) < /dev/hvc1 >/dev/null 2>&1 &'";
+            S.to_string()
+        }),
     ];
 
     if !directory_shares.is_empty() {
@@ -1139,6 +1212,17 @@ fn nsurl_from_path(path: &Path) -> Result<Retained<NSURL>, Box<dyn std::error::E
             .ok_or("Non-UTF8 path encountered while building NSURL")?,
     );
     Ok(NSURL::fileURLWithPath(&ns_path))
+}
+
+fn terminal_size(fd: i32) -> Option<(u16, u16)> {
+    let mut winsize: libc::winsize = unsafe { std::mem::zeroed() };
+    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut winsize) } != 0 {
+        return None;
+    }
+    if winsize.ws_row == 0 || winsize.ws_col == 0 {
+        return None;
+    }
+    Some((winsize.ws_row, winsize.ws_col))
 }
 
 fn enable_raw_mode(fd: i32) -> io::Result<RawModeGuard> {
