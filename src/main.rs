@@ -115,6 +115,18 @@ impl DirectoryShare {
     }
 }
 
+fn instance_dir_name(project_root: &Path) -> String {
+    let path_str = project_root.to_string_lossy();
+    let hash = path_str
+        .bytes()
+        .fold(5381u64, |h, b| h.wrapping_mul(33).wrapping_add(b as u64));
+    let base_name = project_root
+        .file_name()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or("project".into());
+    format!("{}_{:016x}", base_name, hash)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_cli()?;
 
@@ -168,7 +180,7 @@ Options
     let cache_dir = cache_home.join("vibe");
     let guest_mise_cache = cache_dir.join(".guest-mise-cache");
 
-    let instance_dir = project_root.join(".vibe");
+    let instance_dir = home.join(".vibe").join(instance_dir_name(&project_root));
 
     let basename_compressed = DEBIAN_COMPRESSED_DISK_URL.rsplit('/').next().unwrap();
     let base_compressed = cache_dir.join(basename_compressed);
@@ -213,7 +225,7 @@ Options
         // Discourage read/write of project dir subfolders within the VM.
         // Note that this isn't secure, since the VM runs as root and could unmount this.
         // I couldn't find an alternative way to do this --- the MacOS sandbox doesn't apply to the Apple Virtualization system =(
-        for subfolder in [".git", ".vibe"] {
+        for subfolder in [".git"] {
             if project_root.join(subfolder).exists() {
                 login_actions.push(Send(format!(r" mount -t tmpfs tmpfs {}", subfolder)))
             }
@@ -241,6 +253,7 @@ Options
             DirectoryShare::new(home.join(".codex"), "/root/.codex".into(), false),
             DirectoryShare::new(home.join(".claude"), "/root/.claude".into(), false),
             DirectoryShare::new(home.join(".gemini"), "/root/.gemini".into(), false),
+            DirectoryShare::new(home.join(".aws"), "/root/.aws".into(), false),
         ]
         .into_iter()
         .flatten()
