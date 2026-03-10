@@ -14,7 +14,8 @@ apt-get install -y --no-install-recommends      \
         libssl-dev                              \
         curl                                    \
         git                                     \
-        ripgrep
+        ripgrep                                 \
+        jq
 
 
 # Expand disk partition
@@ -74,8 +75,9 @@ cat > .config/mise/config.toml <<MISE
     uv = "0.9.25"
     node = "24.13.0"
     "npm:@openai/codex" = "latest"
-    "npm:@anthropic-ai/claude-code" = "latest"
+    "claude" = "latest"
     "npm:@google/gemini-cli" = "latest"
+    "npm:agent-browser" = "latest"
 MISE
 
 touch .config/mise/mise.lock
