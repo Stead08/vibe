@@ -7,12 +7,17 @@ on:
   push:
     branches: [main]
 
+  # need this so I can trigger builds manually via website
+  workflow_dispatch:
+
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -31,7 +36,15 @@ jobs:
           cd target/release
           zip vibe-macos-arm64.zip vibe
 
+      - name: Upload branch binary
+        if: github.ref != 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibe-${{ env.BUILD_DATE }}-${{ env.SHA_SHORT }}.zip
+          path: target/release/vibe-macos-arm64.zip
+
       - name: Create sha release
+        if: github.ref == 'refs/heads/main'
         run: |
           gh release create "${{ env.BUILD_DATE }}-${{ env.SHA_SHORT }}" \
             --title "${{ env.BUILD_DATE }}-${{ env.SHA_SHORT }}" \
@@ -41,11 +54,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Delete existing latest release
+        if: github.ref == 'refs/heads/main'
         run: gh release delete latest --cleanup-tag --yes || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create latest release
+        if: github.ref == 'refs/heads/main'
         run: |
           gh release create latest \
             --title "Latest" \

@@ -51,7 +51,7 @@ Finally, as a matter of taste and style:
 
 - The binary is < 1 MB.
 - I wrote the entire README myself, 100% with my human brain.
-- The entire implementation is in one ~1200 line Rust file.
+- The entire implementation is ~1500 lines of Rust.
 - The only Rust dependencies are the [Objc2](https://github.com/madsmtm/objc2) interop crates and the [lexopt](https://github.com/blyxxyz/lexopt) argument parser.
 - There are no emoji anywhere in this repository.
 
@@ -75,17 +75,12 @@ If you use [mise-en-place](https://mise.jdx.dev/):
 I'm not making formal releases or keeping a change log.
 I recommend reading the commit history and pinning to a specific version.
 
-You can also install via `cargo`:
+You can also install via cargo:
 
     cargo install --locked --git https://github.com/lynaghk/vibe.git
 
-If you don't have `cargo`, you need to install Rust:
-
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
 
 ## Using Vibe
-
 
 ```
 vibe [OPTIONS] [disk-image.raw]
@@ -98,6 +93,10 @@ Options
   --mount host-path:guest-path[:read-only | :read-write]    Mount `host-path` inside VM at `guest-path`.
                                                             Defaults to read-write.
                                                             Errors if host-path does not exist.
+  --network [nat | vznat | <bridge interface>]              Guest networking mode (default `nat`).
+                                                            Providing an interface (e.g., `en0`) exposes the VM on that interface.
+                                                            This is just like plugging it in, so it'll get its own IP address, be able to accept incoming connections, etc.
+
   --cpus <count>                                            Number of virtual CPUs (default 2).
   --ram <megabytes>                                         RAM size in megabytes (default 2048).
   --script <path/to/script.sh>                              Run script in VM.
@@ -125,6 +124,10 @@ There is no centralized registry of VMs --- if you want to delete a VM, just del
 
 ## Other notes
 
+- Apple's [VZNATNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vznatnetworkdeviceattachment) loses packets and VMs get wrecked whenever host networking changes (e.g., switching between wifi/ethernet/VPN) and [VZBridgedNetworkDeviceAttachment](https://developer.apple.com/documentation/virtualization/vzbridgednetworkdeviceattachment) requires kowtowing to acquire the restricted [com.apple.vm.networking](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.vm.networking) entitlement.
+  To achieve reliable networking, Vibe bundles the [vmnet-helper](https://github.com/lynaghk/vmnet-helper) and automatically runs it for your VMs.
+  On MacOS < 26, this requires some sudoers magic --- if necessary, Vibe will give you the appropriate incantations to run.
+  
 - The default VM disk is 20 GiB, but only uses about 2.5 GiB.
   Since Apple Filesystem is copy-on-write and doesn't count zeros, disk space is only used when you actually write new blocks.
   You can use `du -h` to see how much space is actually consumed:
@@ -146,9 +149,13 @@ There is no centralized registry of VMs --- if you want to delete a VM, just del
 
 - Claude Code requires both your `~/.claude` folder (shared in the VM by default) and also the `~/.claude.json` file for auth credentials and session history.
   VirtioFS only works with folders, so there's not a nice way to "mount" the latter inside the VM.
-  However, you can paper this over with a shell script wrapper --- see [this issue](https://github.com/lynaghk/vibe/issues/18) for an example.
-  (Also: Wild to me that Anthropic puts both a file and a folder in your home directory --- how rude!)
+  Here's what I recommend:
+  - Run `claude` and login. (You can do this in a VM or on your actual machine if you trust `claude`.)
+  - `mv ~/.claude.json ~/.claude/dot_claude_dot_json_should_have_been_here.json`
+  - make a shell alias/script to launch Vibe as:
 
+        vibe --send "ln -fs ~/.claude/dot_claude_dot_json_should_have_been_here.json ~/.claude.json" \
+             --send "IS_SANDBOX=1 claude --allow-dangerously-skip-permissions --dangerously-skip-permissions"
 
 ## Alternatives
 
