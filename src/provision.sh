@@ -15,7 +15,7 @@ apt-get install -y --no-install-recommends      \
         curl                                    \
         git                                     \
         ripgrep                                 \
-        jq
+        jq                                     
 
 
 # Expand disk partition
@@ -74,6 +74,7 @@ cat > .config/mise/config.toml <<MISE
     [tools]
     uv = "0.9.25"
     node = "24.13.0"
+    gh = "latest"
     "npm:@openai/codex" = "latest"
     "claude" = "latest"
     "npm:@google/gemini-cli" = "latest"
